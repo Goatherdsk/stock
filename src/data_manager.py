@@ -421,7 +421,7 @@ class StockDataManager:
     
     def _download_single_stock_safe(self, code, name, market, force_update):
         """
-        安全地下载单只股票数据（增强版本，确保有数据的股票一定能下载成功）
+        安全地下载单只股票数据（每个线程使用独立客户端）
         
         Args:
             code: 股票代码
@@ -433,22 +433,23 @@ class StockDataManager:
             dict: 包含成功标志和数据的字典
         """
         try:
-            # 使用增强重试逻辑：最多重试3次，每次使用不同策略
-            for attempt in range(3):
+            # 为每个线程创建独立的客户端实例，避免共享冲突
+            from data_client import StockDataClient
+            thread_client = StockDataClient()
+            
+            # 只重试2次，减少等待时间
+            for attempt in range(2):
                 try:
                     # 根据重试次数调整参数
                     if attempt == 0:
                         # 第一次：标准参数
-                        data = self.client.get_daily_data(code, market=market, count=300)
-                    elif attempt == 1:
-                        # 第二次：减少数据量
-                        data = self.client.get_daily_data(code, market=market, count=100)
+                        data = thread_client.get_daily_data(code, market=market, count=300)
                     else:
-                        # 第三次：最少数据量
-                        data = self.client.get_daily_data(code, market=market, count=30)
+                        # 第二次：减少数据量，更快获取
+                        data = thread_client.get_daily_data(code, market=market, count=100)
                     
                     if not data.empty:
-                        # 验证数据质量
+                        # 快速验证数据质量
                         if '收盘' in data.columns and len(data) > 0:
                             latest_close = data['收盘'].iloc[-1]
                             if pd.notna(latest_close) and latest_close > 0:
@@ -468,14 +469,14 @@ class StockDataManager:
                                     'data': stock_info
                                 }
                 
-                    # 重试前短暂等待
-                    if attempt < 2:
-                        time.sleep(0.1 * (attempt + 1))  # 递增等待时间
+                    # 重试前极短等待，多线程下减少冲突
+                    if attempt == 0:
+                        time.sleep(0.01)  # 只等待10毫秒
                         
                 except Exception as e:
-                    # 重试前短暂等待
-                    if attempt < 2:
-                        time.sleep(0.1 * (attempt + 1))
+                    # 只在第一次失败时短暂等待
+                    if attempt == 0:
+                        time.sleep(0.01)
                     continue
             
             return {

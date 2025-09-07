@@ -108,7 +108,7 @@ class StockDataClient:
     
     def get_daily_data(self, code, market=None, count=30):
         """
-        获取股票日线数据 - 极简版本，只重试2次
+        获取股票日线数据 - 高速版本，专为多线程优化
         
         Args:
             code: 股票代码
@@ -149,9 +149,9 @@ class StockDataClient:
             except Exception:
                 pass  # 静默处理所有异常
                 
-            # 短暂休息后重试
+            # 多线程环境下减少等待时间
             if attempt == 0:
-                time.sleep(0.05)
+                time.sleep(0.01)  # 只等待10毫秒
         
         return pd.DataFrame()
     
