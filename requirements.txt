@@ -1,4 +1,4 @@
-mootdx==1.9.6
+mootdx
 pandas>=1.5.0
 numpy>=1.21.0
 matplotlib>=3.5.0

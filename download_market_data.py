@@ -26,12 +26,28 @@ def main():
     parser.add_argument('--data-dir', type=str, default='stock_data', help='数据存储目录')
     parser.add_argument('--test', action='store_true', help='测试模式：仅下载前100只股票')
     parser.add_argument('--all-stocks', action='store_true', default=True, help='下载所有A股股票（默认开启）')
+    parser.add_argument('--end-date', type=str, help='下载数据的结束日期（格式：YYYY-MM-DD），例如：2024-03-15')
     
     args = parser.parse_args()
+    
+    # 验证并解析结束日期
+    end_date = None
+    if args.end_date:
+        try:
+            end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
+            print(f"🎯 指定下载结束日期: {end_date.strftime('%Y年%m月%d日')}")
+        except ValueError:
+            print(f"❌ 日期格式错误: {args.end_date}")
+            print("正确格式: YYYY-MM-DD，例如：2024-03-15")
+            return 1
+    else:
+        end_date = datetime.now()
+        print(f"🎯 默认下载结束日期: {end_date.strftime('%Y年%m月%d日')} (今天)")
     
     print("🎯 A股全市场数据下载工具")
     print("=" * 60)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"数据下载到: {end_date.strftime('%Y年%m月%d日')}")
     
     # 初始化数据管理器
     try:
@@ -83,7 +99,8 @@ def main():
             force_update=args.force,
             max_stocks=max_stocks,
             batch_size=args.batch_size,
-            max_workers=args.max_workers
+            max_workers=args.max_workers,
+            end_date=end_date.strftime('%Y%m%d')  # 添加结束日期参数
         )
         
         if all_data:

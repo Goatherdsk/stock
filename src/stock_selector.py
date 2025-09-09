@@ -13,19 +13,73 @@ from datetime import datetime, timedelta
 class StockSelector:
     """股票选股器"""
     
-    def __init__(self, m1=14, m2=28, m3=57, m4=114):
+    def __init__(self, m1=14, m2=28, m3=57, m4=114, data_dir='stock_data'):
         """
         初始化选股器
         
         Args:
             m1, m2, m3, m4: 知行多空线的均线参数，默认为14, 28, 57, 114
+            data_dir: 数据存储目录
         """
         self.data_client = StockDataClient()
         self.m1 = m1
         self.m2 = m2
         self.m3 = m3
         self.m4 = m4
+        self.data_dir = data_dir
         
+    def get_stock_data_for_date(self, code, market, analysis_date, data_count):
+        """
+        获取指定日期及之前的股票数据
+        
+        Args:
+            code: 股票代码
+            market: 市场 (0: 深圳, 1: 上海)
+            analysis_date: 分析日期 (格式: YYYYMMDD)
+            data_count: 需要的数据条数
+        """
+        try:
+            # 尝试从本地数据获取
+            local_file = os.path.join(self.data_dir, "stocks", f"{code}.csv")
+            if os.path.exists(local_file):
+                # 读取本地数据
+                df = pd.read_csv(local_file)
+                if not df.empty and '日期' in df.columns:
+                    # 确保日期格式正确
+                    df['日期'] = pd.to_datetime(df['日期'], format='%Y%m%d', errors='coerce')
+                    # 筛选到指定日期及之前的数据
+                    target_date = pd.to_datetime(analysis_date, format='%Y%m%d')
+                    df = df[df['日期'] <= target_date]
+                    
+                    if len(df) >= data_count:
+                        # 返回最近的data_count条数据
+                        return df.tail(data_count).reset_index(drop=True)
+                    elif len(df) > 0:
+                        # 如果数据不够，返回所有可用数据
+                        print(f"⚠️  {code} 本地数据不足，期望{data_count}条，实际{len(df)}条")
+                        return df.reset_index(drop=True)
+            
+            # 如果本地数据不存在或不足，使用在线数据
+            print(f"📡 {code} 使用在线数据 (目标日期: {analysis_date})")
+            data = self.data_client.get_daily_data(code, market=market, count=data_count)
+            
+            # 如果指定了分析日期，需要筛选数据
+            if not data.empty and analysis_date:
+                try:
+                    # 确保日期列存在并转换格式
+                    if '日期' in data.columns:
+                        data['日期'] = pd.to_datetime(data['日期'], format='%Y%m%d', errors='coerce')
+                        target_date = pd.to_datetime(analysis_date, format='%Y%m%d')
+                        data = data[data['日期'] <= target_date]
+                except Exception as e:
+                    print(f"⚠️  {code} 日期筛选出错: {e}")
+            
+            return data
+            
+        except Exception as e:
+            print(f"❌ 获取 {code} 数据失败: {e}")
+            return pd.DataFrame()
+    
     def calculate_technical_indicators(self, data):
         """
         计算技术指标
@@ -78,7 +132,7 @@ class StockSelector:
         
         return df
     
-    def b1_strategy(self, stocks_data):
+    def b1_strategy(self, stocks_data, analysis_date=None):
         """
         B1策略选股
         
@@ -91,10 +145,14 @@ class StockSelector:
         
         Args:
             stocks_data: 股票数据字典
+            analysis_date: 分析日期 (格式: YYYYMMDD)
         """
         selected_stocks = []
         
         print("正在执行B1策略筛选...")
+        if analysis_date:
+            analysis_date_str = pd.to_datetime(analysis_date, format='%Y%m%d').strftime('%Y年%m月%d日')
+            print(f"📅 基于 {analysis_date_str} 的数据进行分析")
         print(f"筛选条件:")
         print(f"  1. J值 <= 13")
         print(f"  2. 涨幅 >= -2% AND 涨幅 <= 1.8%")
@@ -176,13 +234,14 @@ class StockSelector:
             print("❌ B1策略未找到符合条件的股票")
             return pd.DataFrame()
     
-    def save_to_blk_file(self, selected_stocks, filename):
+    def save_to_blk_file(self, selected_stocks, filename, analysis_date=None):
         """
         保存选股结果为.blk文件 (通达信格式)
         
         Args:
             selected_stocks: 选出的股票DataFrame
             filename: 文件名
+            analysis_date: 分析日期 (格式: YYYYMMDD)
         """
         if selected_stocks.empty:
             print("❌ 没有股票可保存")
@@ -193,9 +252,14 @@ class StockSelector:
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
-        # 生成文件路径
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join(output_dir, f"{filename}_{timestamp}.blk")
+        # 生成文件路径，包含分析日期
+        if analysis_date:
+            date_str = analysis_date
+        else:
+            date_str = datetime.now().strftime("%Y%m%d")
+        
+        timestamp = datetime.now().strftime("%H%M%S")
+        filepath = os.path.join(output_dir, f"{filename}_{date_str}_{timestamp}.blk")
         
         # 转换股票代码为7位格式（第一位是市场标识）
         blk_codes = []
@@ -225,7 +289,7 @@ class StockSelector:
             print(f"❌ 保存文件失败: {e}")
             return None
     
-    def run_stock_selection(self, strategy='b1', stock_count=None, stock_list=None, save_blk=True):
+    def run_stock_selection(self, strategy='b1', stock_count=None, stock_list=None, save_blk=True, analysis_date=None):
         """
         执行选股
         
@@ -234,9 +298,14 @@ class StockSelector:
             stock_count: 分析股票数量，None表示分析所有股票
             stock_list: 指定的股票代码列表，如果指定则只分析这些股票
             save_blk: 是否保存为BLK文件
+            analysis_date: 分析日期 (格式: YYYYMMDD)
         """
         print(f"开始执行{strategy}策略选股...")
         print(f"知行多空线参数: M1={self.m1}, M2={self.m2}, M3={self.m3}, M4={self.m4}")
+        
+        if analysis_date:
+            analysis_date_str = pd.to_datetime(analysis_date, format='%Y%m%d').strftime('%Y年%m月%d日')
+            print(f"📅 分析基准日期: {analysis_date_str}")
         
         # 如果指定了股票列表，直接使用
         if stock_list:
@@ -300,7 +369,7 @@ class StockSelector:
             
             # 获取足够的数据
             try:
-                data = self.data_client.get_daily_data(code, market=market, count=data_count)
+                data = self.get_stock_data_for_date(code, market=market, analysis_date=analysis_date, data_count=data_count)
                 if not data.empty:
                     # 计算技术指标
                     data = self.calculate_technical_indicators(data)
@@ -319,14 +388,14 @@ class StockSelector:
         
         # 执行选股策略
         if strategy == 'b1':
-            selected = self.b1_strategy(stocks_data)
+            selected = self.b1_strategy(stocks_data, analysis_date=analysis_date)
         else:
             print(f"未知策略: {strategy}")
             return pd.DataFrame()
         
         # 保存为BLK文件
         if save_blk and not selected.empty:
-            self.save_to_blk_file(selected, f"{strategy.upper()}")
+            self.save_to_blk_file(selected, f"{strategy.upper()}", analysis_date=analysis_date)
         
         return selected
 

@@ -26,9 +26,11 @@ echo "6. 清理旧数据"
 echo "7. 运行B1选股策略 (全市场分析) [推荐]"
 echo "8. 运行B1选股策略 (测试模式 - 100只股票)"
 echo "9. 运行B1选股策略 (先下载全市场数据)"
+echo "10. 指定日期选股分析 (例如：2024-03-15)"
+echo "11. 指定日期数据下载 (例如：2024-03-15)"
 echo "0. 退出"
 
-read -p "请输入选择 [0-9]: " choice
+read -p "请输入选择 [0-11]: " choice
 
 case $choice in
     1)
@@ -69,6 +71,30 @@ case $choice in
         echo "🚀 运行B1选股策略 (先下载全市场数据)..."
         echo "使用多线程加速下载..."
         python3 main.py --download-first --all-stocks --max-workers 15
+        ;;
+    10)
+        echo "🎯 指定日期选股分析"
+        echo "格式示例: 2024-03-15"
+        read -p "请输入分析日期 (YYYY-MM-DD): " analysis_date
+        if [[ -z "$analysis_date" ]]; then
+            echo "❌ 未输入日期，使用当前日期"
+            python3 main.py --all-stocks
+        else
+            echo "🚀 运行B1选股策略 (分析日期: $analysis_date)..."
+            python3 main.py --all-stocks --date "$analysis_date"
+        fi
+        ;;
+    11)
+        echo "📥 指定日期数据下载"
+        echo "格式示例: 2024-03-15"
+        read -p "请输入下载结束日期 (YYYY-MM-DD): " download_date
+        if [[ -z "$download_date" ]]; then
+            echo "❌ 未输入日期，下载到当前日期"
+            python3 download_market_data.py --all-stocks --max-workers 15
+        else
+            echo "📥 开始下载到指定日期的数据 (结束日期: $download_date)..."
+            python3 download_market_data.py --all-stocks --max-workers 15 --end-date "$download_date"
+        fi
         ;;
     0)
         echo "👋 退出"

@@ -202,7 +202,7 @@ class StockDataManager:
         
         return data
     
-    def download_all_market_data(self, force_update=False, max_stocks=None, batch_size=50, max_workers=10):
+    def download_all_market_data(self, force_update=False, max_stocks=None, batch_size=50, max_workers=10, end_date=None):
         """
         下载全市场数据
         
@@ -211,13 +211,18 @@ class StockDataManager:
             max_stocks: 最大股票数量（用于测试）
             batch_size: 批处理大小
             max_workers: 最大线程数
+            end_date: 结束日期 (格式: YYYYMMDD)
         """
         print("🚀 开始获取A股全市场数据")
         print("=" * 60)
         
+        if end_date:
+            end_date_str = pd.to_datetime(end_date, format='%Y%m%d').strftime('%Y年%m月%d日')
+            print(f"📅 数据获取到: {end_date_str}")
+        
         # 检查是否需要更新
         need_update, reason = self._should_update_data()
-        if not need_update and not force_update:
+        if not need_update and not force_update and not end_date:
             print(f"ℹ️  {reason}")
             existing_data = self._load_existing_data()
             if existing_data:
@@ -257,7 +262,7 @@ class StockDataManager:
             print("-" * 40)
             
             batch_start_time = time.time()
-            batch_data, batch_failed = self._process_batch_threaded(batch_stocks, force_update, max_workers)
+            batch_data, batch_failed = self._process_batch_threaded(batch_stocks, force_update, max_workers, end_date)
             batch_end_time = time.time()
             
             # 合并结果
@@ -286,8 +291,12 @@ class StockDataManager:
             # 删除批次间休息，最大化下载速度
         
         # 保存全量数据
-        today_str = self._get_today_str()
-        all_data_file = os.path.join(self.data_dir, f"all_market_data_{today_str}.pkl")
+        if end_date:
+            data_date = end_date
+        else:
+            data_date = self._get_today_str()
+        
+        all_data_file = os.path.join(self.data_dir, f"all_market_data_{data_date}.pkl")
         
         try:
             with open(all_data_file, 'wb') as f:
@@ -300,15 +309,19 @@ class StockDataManager:
         end_time = time.time()
         total_time = end_time - start_time
         
-        self.metadata["last_update"] = today_str
+        update_date = data_date  # 使用数据日期作为更新标识
+        
+        self.metadata["last_update"] = update_date
         self.metadata["successful_stocks"] = successful_count
         self.metadata["failed_stocks"] = len(failed_stocks)
         self.metadata["update_history"].append({
-            "date": today_str,
+            "date": update_date,
             "total_stocks": len(stocks),
             "successful": successful_count,
             "failed": len(failed_stocks),
-            "duration": total_time
+            "duration": total_time,
+            "is_historical": bool(end_date),  # 标记是否为历史数据
+            "target_date": end_date if end_date else update_date
         })
         
         # 保留最近10次更新记录
@@ -371,7 +384,7 @@ class StockDataManager:
         
         return batch_data, failed_stocks
     
-    def _process_batch_threaded(self, batch_stocks, force_update, max_workers=10):
+    def _process_batch_threaded(self, batch_stocks, force_update, max_workers=10, end_date=None):
         """
         使用多线程处理单批股票
         
@@ -379,6 +392,7 @@ class StockDataManager:
             batch_stocks: 股票批次数据
             force_update: 强制更新
             max_workers: 最大工作线程数
+            end_date: 结束日期 (格式: YYYYMMDD)
         """
         batch_data = {}
         failed_stocks = []
@@ -392,7 +406,7 @@ class StockDataManager:
                 name = row.get('name', code)
                 market = 1 if str(code).startswith('6') else 0
                 
-                future = executor.submit(self._download_single_stock_safe, code, name, market, force_update)
+                future = executor.submit(self._download_single_stock_safe, code, name, market, force_update, end_date)
                 future_to_stock[future] = (code, name)
             
             # 收集结果
@@ -419,7 +433,7 @@ class StockDataManager:
         
         return batch_data, failed_stocks
     
-    def _download_single_stock_safe(self, code, name, market, force_update):
+    def _download_single_stock_safe(self, code, name, market, force_update, end_date=None):
         """
         安全地下载单只股票数据（每个线程使用独立客户端）
         
@@ -428,6 +442,7 @@ class StockDataManager:
             name: 股票名称  
             market: 市场标识
             force_update: 强制更新
+            end_date: 结束日期 (格式: YYYYMMDD)
             
         Returns:
             dict: 包含成功标志和数据的字典
@@ -448,6 +463,17 @@ class StockDataManager:
                         # 第二次：减少数据量，更快获取
                         data = thread_client.get_daily_data(code, market=market, count=100)
                     
+                    # 如果指定了结束日期，需要筛选数据
+                    if not data.empty and end_date:
+                        try:
+                            # 确保日期列存在并转换格式
+                            if '日期' in data.columns:
+                                data['日期'] = pd.to_datetime(data['日期'], format='%Y%m%d', errors='coerce')
+                                target_date = pd.to_datetime(end_date, format='%Y%m%d')
+                                data = data[data['日期'] <= target_date]
+                        except Exception as e:
+                            print(f"⚠️  {code} 日期筛选出错: {e}")
+                    
                     if not data.empty:
                         # 快速验证数据质量
                         if '收盘' in data.columns and len(data) > 0:
@@ -460,7 +486,8 @@ class StockDataManager:
                                         'name': name,
                                         'market': market,
                                         'update_time': datetime.now().isoformat(),
-                                        'data_count': len(data)
+                                        'data_count': len(data),
+                                        'end_date': end_date if end_date else datetime.now().strftime('%Y%m%d')
                                     }
                                 }
                                 

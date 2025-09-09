@@ -30,8 +30,23 @@ def main():
     parser.add_argument('--m4', type=int, default=114, help='知行多空线参数M4')
     parser.add_argument('--data-dir', type=str, default='stock_data', help='数据存储目录')
     parser.add_argument('--stocks', type=str, nargs='+', help='指定分析的股票代码（可以指定多个，空格分隔）')
+    parser.add_argument('--date', type=str, help='指定分析日期（格式：YYYY-MM-DD），例如：2024-03-15')
     
     args = parser.parse_args()
+    
+    # 验证并解析指定日期
+    target_date = None
+    if args.date:
+        try:
+            target_date = datetime.strptime(args.date, '%Y-%m-%d')
+            print(f"🎯 指定分析日期: {target_date.strftime('%Y年%m月%d日')}")
+        except ValueError:
+            print(f"❌ 日期格式错误: {args.date}")
+            print("正确格式: YYYY-MM-DD，例如：2024-03-15")
+            return
+    else:
+        target_date = datetime.now()
+        print(f"🎯 默认分析日期: {target_date.strftime('%Y年%m月%d日')} (今天)")
     
     # 确定分析股票数量和范围
     if args.stocks:
@@ -54,17 +69,19 @@ def main():
     print("🎯 B1股票选股系统启动")
     print("=" * 60)
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"分析日期: {target_date.strftime('%Y年%m月%d日')}")
     
     # 如果需要先下载数据（默认开启）
     if args.download_first and not args.use_local:
-        print("\n📥 正在下载最新市场数据...")
+        print(f"\n📥 正在下载到 {target_date.strftime('%Y-%m-%d')} 的市场数据...")
         print(f"🔧 使用 {args.max_workers} 个线程并发下载")
         try:
             manager = StockDataManager(data_dir=args.data_dir)
             download_count = stock_count * 2 if stock_count else None  # 如果指定了数量，多下载一些作为备选
             manager.download_all_market_data(
                 max_stocks=download_count, 
-                max_workers=args.max_workers
+                max_workers=args.max_workers,
+                end_date=target_date.strftime('%Y%m%d')  # 下载到指定日期
             )
         except Exception as e:
             print(f"❌ 数据下载失败: {e}")
@@ -72,16 +89,17 @@ def main():
     
     # 初始化选股器
     try:
-        selector = StockSelector(m1=args.m1, m2=args.m2, m3=args.m3, m4=args.m4)
+        selector = StockSelector(m1=args.m1, m2=args.m2, m3=args.m3, m4=args.m4, data_dir=args.data_dir)
         print(f"✅ 选股系统初始化成功")
         print(f"📊 知行多空线参数: M1={args.m1}, M2={args.m2}, M3={args.m3}, M4={args.m4}")
         print(f"💾 数据模式: {'本地数据' if args.use_local else '在线数据'}")
+        print(f"📅 分析基准日期: {target_date.strftime('%Y-%m-%d')}")
     except Exception as e:
         print(f"❌ 选股系统初始化失败: {e}")
         return
     
     # B1策略选股
-    print("\n🚀 执行B1策略选股...")
+    print(f"\n🚀 执行B1策略选股 (基于 {target_date.strftime('%Y-%m-%d')} 数据)...")
     print("-" * 40)
     
     try:
@@ -89,7 +107,8 @@ def main():
             strategy='b1', 
             stock_count=stock_count,
             stock_list=stock_list,
-            save_blk=True
+            save_blk=True,
+            analysis_date=target_date.strftime('%Y%m%d')  # 传递分析日期
         )
         
         if not b1_stocks.empty:
