@@ -9,6 +9,9 @@ import numpy as np
 import os
 from data_client import StockDataClient  # 修改为绝对导入
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import time
 
 class StockSelector:
     """股票选股器"""
@@ -28,7 +31,269 @@ class StockSelector:
         self.m4 = m4
         self.data_dir = data_dir
         
+        # 线程锁，用于保护共享资源
+        self._lock = threading.Lock()
+        
+    def load_stocks_data_parallel(self, analysis_stocks, analysis_date=None, max_workers=10, batch_size=50):
+        """
+        并行加载股票数据
+        
+        Args:
+            analysis_stocks: 需要分析的股票列表 (DataFrame)
+            analysis_date: 分析日期 (格式: YYYYMMDD)
+            max_workers: 最大线程数
+            batch_size: 批处理大小
+            
+        Returns:
+            dict: 股票代码为键，数据为值的字典
+        """
+        print(f"🚀 开始并行加载 {len(analysis_stocks)} 只股票的数据...")
+        print(f"⚙️  线程配置: 批处理大小={batch_size}, 最大线程数={max_workers}")
+        
+        # 确保获取足够的数据来计算最大周期的均线
+        max_period = max(self.m1, self.m2, self.m3, self.m4)
+        data_count = max_period + 30  # 多获取30天数据确保计算准确
+        
+        stocks_data = {}
+        failed_stocks = []
+        start_time = time.time()
+        
+        # 分批处理
+        total_batches = (len(analysis_stocks) + batch_size - 1) // batch_size
+        successful_count = 0
+        
+        for i in range(0, len(analysis_stocks), batch_size):
+            batch_stocks = analysis_stocks.iloc[i:i+batch_size]
+            batch_num = i // batch_size + 1
+            
+            print(f"\n📦 处理第 {batch_num}/{total_batches} 批股票 ({len(batch_stocks)} 只)")
+            print("-" * 40)
+            
+            batch_start_time = time.time()
+            batch_data, batch_failed = self._load_batch_data_threaded(
+                batch_stocks, analysis_date, data_count, max_workers
+            )
+            batch_end_time = time.time()
+            
+            # 合并结果
+            with self._lock:
+                stocks_data.update(batch_data)
+                failed_stocks.extend(batch_failed)
+                successful_count += len(batch_data)
+            
+            # 显示批次进度
+            batch_success_rate = len(batch_data) / len(batch_stocks) * 100
+            batch_time = batch_end_time - batch_start_time
+            print(f"✅ 第{batch_num}批完成: {len(batch_data)}/{len(batch_stocks)} 成功 "
+                  f"({batch_success_rate:.1f}%), 耗时: {batch_time:.1f}秒")
+            
+            # 显示总体进度
+            total_progress = (i + len(batch_stocks)) / len(analysis_stocks) * 100
+            elapsed_time = time.time() - start_time
+            estimated_total_time = elapsed_time / total_progress * 100 if total_progress > 0 else 0
+            remaining_time = estimated_total_time - elapsed_time
+            
+            print(f"📈 总进度: {successful_count}/{len(analysis_stocks)} "
+                  f"({total_progress:.1f}%), 已用时: {elapsed_time:.1f}秒, "
+                  f"预计剩余: {remaining_time:.1f}秒")
+        
+        # 打印总体统计
+        total_time = time.time() - start_time
+        success_rate = successful_count / len(analysis_stocks) * 100
+        
+        print(f"\n🎉 数据加载完成!")
+        print("=" * 50)
+        print(f"✅ 成功加载: {successful_count} 只股票 ({success_rate:.1f}%)")
+        print(f"❌ 加载失败: {len(failed_stocks)} 只股票")
+        print(f"⏱️  总耗时: {total_time:.1f} 秒")
+        print(f"📈 平均速度: {successful_count/total_time:.1f} 只/秒")
+        
+        if failed_stocks:
+            print(f"\n⚠️  失败股票列表 (前10个): {failed_stocks[:10]}")
+            if len(failed_stocks) > 10:
+                print(f"    ... 还有 {len(failed_stocks)-10} 只股票加载失败")
+        
+        return stocks_data
+    
+    def _load_batch_data_threaded(self, batch_stocks, analysis_date, data_count, max_workers):
+        """
+        使用多线程加载单批股票数据
+        
+        Args:
+            batch_stocks: 股票批次数据
+            analysis_date: 分析日期
+            data_count: 需要的数据条数
+            max_workers: 最大工作线程数
+            
+        Returns:
+            tuple: (成功的股票数据字典, 失败的股票代码列表)
+        """
+        batch_data = {}
+        failed_stocks = []
+        
+        # 创建线程池
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # 提交所有任务
+            future_to_stock = {}
+            for idx, row in batch_stocks.iterrows():
+                code = row['code']
+                name = row.get('name', code)
+                market = 1 if str(code).startswith('6') else 0
+                
+                future = executor.submit(
+                    self._load_single_stock_safe, code, name, market, analysis_date, data_count
+                )
+                future_to_stock[future] = (code, name)
+            
+            # 收集结果
+            completed_count = 0
+            for future in as_completed(future_to_stock):
+                code, name = future_to_stock[future]
+                completed_count += 1
+                
+                try:
+                    result = future.result()
+                    if result['success']:
+                        batch_data[code] = result['data']
+                        print(f"✅ {code} ({name}) - {len(result['data'])} 条记录 ({completed_count}/{len(batch_stocks)})")
+                    else:
+                        failed_stocks.append(code)
+                        print(f"❌ {code} ({name}) - {result['error']} ({completed_count}/{len(batch_stocks)})")
+                        
+                except Exception as e:
+                    failed_stocks.append(code)
+                    print(f"❌ {code} ({name}) - 线程异常: {e} ({completed_count}/{len(batch_stocks)})")
+        
+        return batch_data, failed_stocks
+    
+    def _load_single_stock_safe(self, code, name, market, analysis_date, data_count):
+        """
+        安全地加载单只股票数据并计算技术指标
+        
+        Args:
+            code: 股票代码
+            name: 股票名称
+            market: 市场标识
+            analysis_date: 分析日期
+            data_count: 需要的数据条数
+            
+        Returns:
+            dict: 包含成功标志和数据的字典
+        """
+        try:
+            # 为每个线程创建独立的客户端实例，避免共享冲突
+            from data_client import StockDataClient
+            thread_client = StockDataClient()
+            
+            # 获取股票数据
+            data = self._get_stock_data_for_date_thread_safe(
+                code, market, analysis_date, data_count, thread_client
+            )
+            
+            if not data.empty:
+                # 计算技术指标
+                data_with_indicators = self.calculate_technical_indicators(data)
+                
+                # 验证指标计算是否成功
+                required_indicators = ['J', 'ZF', 'ZF幅', '知行短期趋势线', '知行多空线']
+                latest = data_with_indicators.iloc[-1]
+                
+                # 检查必要指标是否都存在且不为NaN
+                all_valid = all(
+                    indicator in latest.index and pd.notna(latest[indicator])
+                    for indicator in required_indicators
+                )
+                
+                if all_valid:
+                    return {
+                        'success': True,
+                        'data': data_with_indicators
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'error': '技术指标计算失败'
+                    }
+            else:
+                return {
+                    'success': False,
+                    'error': '无数据'
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def _get_stock_data_for_date_thread_safe(self, code, market, analysis_date, data_count, thread_client):
+        """
+        线程安全的股票数据获取方法
+        
+        Args:
+            code: 股票代码
+            market: 市场标识
+            analysis_date: 分析日期
+            data_count: 需要的数据条数
+            thread_client: 线程专用的客户端实例
+            
+        Returns:
+            DataFrame: 股票数据
+        """
+        try:
+            # 尝试从本地数据获取（本地文件读取是线程安全的）
+            local_file = os.path.join(self.data_dir, "stocks", f"{code}.csv")
+            if os.path.exists(local_file):
+                # 读取本地数据
+                df = pd.read_csv(local_file)
+                if not df.empty and '日期' in df.columns:
+                    # 确保日期格式正确
+                    df['日期'] = pd.to_datetime(df['日期'], format='%Y%m%d', errors='coerce')
+                    # 筛选到指定日期及之前的数据
+                    if analysis_date:
+                        target_date = pd.to_datetime(analysis_date, format='%Y%m%d')
+                        df = df[df['日期'] <= target_date]
+                    
+                    if len(df) >= data_count:
+                        # 返回最近的data_count条数据
+                        return df.tail(data_count).reset_index(drop=True)
+                    elif len(df) > 0:
+                        # 如果数据不够，返回所有可用数据
+                        return df.reset_index(drop=True)
+            
+            # 如果本地数据不存在或不足，使用在线数据（使用线程专用客户端）
+            data = thread_client.get_daily_data(code, market=market, count=data_count)
+            
+            # 如果指定了分析日期，需要筛选数据
+            if not data.empty and analysis_date:
+                try:
+                    # 确保日期列存在并转换格式
+                    if '日期' in data.columns:
+                        data['日期'] = pd.to_datetime(data['日期'], format='%Y%m%d', errors='coerce')
+                        target_date = pd.to_datetime(analysis_date, format='%Y%m%d')
+                        data = data[data['日期'] <= target_date]
+                except Exception:
+                    # 日期筛选失败时返回原始数据
+                    pass
+            
+            return data
+            
+        except Exception:
+            return pd.DataFrame()
+
     def get_stock_data_for_date(self, code, market, analysis_date, data_count):
+        """
+        获取指定日期及之前的股票数据（保留原方法用于兼容性）
+        
+        Args:
+            code: 股票代码
+            market: 市场 (0: 深圳, 1: 上海)
+            analysis_date: 分析日期 (格式: YYYYMMDD)
+            data_count: 需要的数据条数
+        """
+        return self._get_stock_data_for_date_thread_safe(
+            code, market, analysis_date, data_count, self.data_client
+        )
         """
         获取指定日期及之前的股票数据
         
@@ -289,9 +554,9 @@ class StockSelector:
             print(f"❌ 保存文件失败: {e}")
             return None
     
-    def run_stock_selection(self, strategy='b1', stock_count=None, stock_list=None, save_blk=True, analysis_date=None):
+    def run_stock_selection(self, strategy='b1', stock_count=None, stock_list=None, save_blk=True, analysis_date=None, max_workers=10, batch_size=50):
         """
-        执行选股
+        执行选股（支持多线程加速数据读取）
         
         Args:
             strategy: 策略类型 ('b1')
@@ -299,6 +564,8 @@ class StockSelector:
             stock_list: 指定的股票代码列表，如果指定则只分析这些股票
             save_blk: 是否保存为BLK文件
             analysis_date: 分析日期 (格式: YYYYMMDD)
+            max_workers: 最大线程数（默认10）
+            batch_size: 批处理大小（默认50）
         """
         print(f"开始执行{strategy}策略选股...")
         print(f"知行多空线参数: M1={self.m1}, M2={self.m2}, M3={self.m3}, M4={self.m4}")
@@ -348,43 +615,14 @@ class StockSelector:
                 analysis_stocks = real_stocks.head(stock_count)
                 print(f"📊 限量分析模式：分析前{len(analysis_stocks)}只股票")
         
-        # 获取股票数据并计算指标
-        stocks_data = {}
-        print(f"正在获取 {len(analysis_stocks)} 只股票的数据...")
-        
-        # 确保获取足够的数据来计算最大周期的均线
-        max_period = max(self.m1, self.m2, self.m3, self.m4)
-        data_count = max_period + 30  # 多获取30天数据确保计算准确
-        
-        success_count = 0
-        total_count = len(analysis_stocks)
-        
-        for idx, row in analysis_stocks.iterrows():
-            code = row['code']
-            market = 1 if code.startswith('6') else 0
-            
-            # 显示进度
-            progress = f"({success_count + 1}/{total_count})"
-            print(f"正在获取 {code} ({row['name']}) 数据... {progress}")
-            
-            # 获取足够的数据
-            try:
-                data = self.get_stock_data_for_date(code, market=market, analysis_date=analysis_date, data_count=data_count)
-                if not data.empty:
-                    # 计算技术指标
-                    data = self.calculate_technical_indicators(data)
-                    stocks_data[code] = data
-                    success_count += 1
-                    
-                    # 每获取100只股票显示一次汇总进度
-                    if success_count % 100 == 0:
-                        print(f"✅ 已成功获取 {success_count}/{total_count} 只股票数据")
-                        
-            except Exception as e:
-                print(f"❌ 获取 {code} 数据失败: {e}")
-                continue
-        
-        print(f"✅ 成功获取 {len(stocks_data)} 只股票的数据")
+        # 使用多线程并行加载股票数据和计算指标
+        print(f"🔧 多线程配置: 批处理大小={batch_size}, 最大线程数={max_workers}")
+        stocks_data = self.load_stocks_data_parallel(
+            analysis_stocks, 
+            analysis_date=analysis_date, 
+            max_workers=max_workers, 
+            batch_size=batch_size
+        )
         
         # 执行选股策略
         if strategy == 'b1':

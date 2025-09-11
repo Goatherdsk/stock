@@ -19,11 +19,13 @@ from data_manager import StockDataManager
 def main():
     parser = argparse.ArgumentParser(description='B1股票选股系统')
     parser.add_argument('--use-local', action='store_true', help='使用本地数据')
-    parser.add_argument('--download-first', action='store_true', default=True, help='先下载最新数据再选股(默认开启)')
+    parser.add_argument('--download-first', action='store_true', help='先下载最新数据再选股')
     parser.add_argument('--stock-count', type=int, help='分析股票数量(不指定则分析所有A股)')
     parser.add_argument('--test-mode', action='store_true', help='测试模式：只分析前100只股票')
     parser.add_argument('--all-stocks', action='store_true', default=True, help='分析所有A股股票(默认开启)')
-    parser.add_argument('--max-workers', type=int, default=10, help='下载数据时的最大线程数（默认10）')
+    parser.add_argument('--max-workers', type=int, default=10, help='下载和读取数据时的最大线程数（默认10）')
+    parser.add_argument('--read-max-workers', type=int, default=10, help='读取数据时的最大线程数（默认10，继承--max-workers）')
+    parser.add_argument('--batch-size', type=int, default=50, help='读取数据时的批处理大小（默认50）')
     parser.add_argument('--m1', type=int, default=14, help='知行多空线参数M1')
     parser.add_argument('--m2', type=int, default=28, help='知行多空线参数M2')
     parser.add_argument('--m3', type=int, default=57, help='知行多空线参数M3')
@@ -71,12 +73,37 @@ def main():
     print(f"启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"分析日期: {target_date.strftime('%Y年%m月%d日')}")
     
-    # 如果需要先下载数据（默认开启）
-    if args.download_first and not args.use_local:
-        print(f"\n📥 正在下载到 {target_date.strftime('%Y-%m-%d')} 的市场数据...")
+    # 检查是否需要下载数据
+    should_download = False
+    
+    if args.download_first:
+        # 用户明确指定要先下载
+        should_download = True
+        print(f"\n📥 用户指定先下载数据模式")
+    elif not args.use_local:
+        # 检查是否已有当日数据
+        try:
+            from data_manager import StockDataManager
+            manager = StockDataManager(data_dir=args.data_dir)
+            target_date_str = target_date.strftime('%Y%m%d')
+            existing_data = manager.get_market_data(target_date_str)
+            
+            if not existing_data:
+                should_download = True
+                print(f"\n📥 未找到 {target_date.strftime('%Y-%m-%d')} 的本地数据，将自动下载...")
+            else:
+                print(f"\n✅ 已有 {target_date.strftime('%Y-%m-%d')} 的本地数据 ({len(existing_data)} 只股票)，跳过下载")
+        except Exception as e:
+            should_download = True
+            print(f"\n📥 检查本地数据时出错 ({e})，将重新下载...")
+    
+    # 如果需要下载数据
+    if should_download and not args.use_local:
+        print(f"📥 正在下载到 {target_date.strftime('%Y-%m-%d')} 的市场数据...")
         print(f"🔧 使用 {args.max_workers} 个线程并发下载")
         try:
-            manager = StockDataManager(data_dir=args.data_dir)
+            if 'manager' not in locals():
+                manager = StockDataManager(data_dir=args.data_dir)
             download_count = stock_count * 2 if stock_count else None  # 如果指定了数量，多下载一些作为备选
             manager.download_all_market_data(
                 max_stocks=download_count, 
@@ -87,6 +114,10 @@ def main():
             print(f"❌ 数据下载失败: {e}")
             print("继续使用在线数据模式...")
     
+    # 确定数据读取的线程配置
+    read_max_workers = args.read_max_workers if args.read_max_workers else args.max_workers
+    batch_size = args.batch_size
+    
     # 初始化选股器
     try:
         selector = StockSelector(m1=args.m1, m2=args.m2, m3=args.m3, m4=args.m4, data_dir=args.data_dir)
@@ -94,6 +125,7 @@ def main():
         print(f"📊 知行多空线参数: M1={args.m1}, M2={args.m2}, M3={args.m3}, M4={args.m4}")
         print(f"💾 数据模式: {'本地数据' if args.use_local else '在线数据'}")
         print(f"📅 分析基准日期: {target_date.strftime('%Y-%m-%d')}")
+        print(f"🔧 数据读取线程配置: 最大线程数={read_max_workers}, 批处理大小={batch_size}")
     except Exception as e:
         print(f"❌ 选股系统初始化失败: {e}")
         return
@@ -108,7 +140,9 @@ def main():
             stock_count=stock_count,
             stock_list=stock_list,
             save_blk=True,
-            analysis_date=target_date.strftime('%Y%m%d')  # 传递分析日期
+            analysis_date=target_date.strftime('%Y%m%d'),  # 传递分析日期
+            max_workers=read_max_workers,  # 使用读取数据的线程数
+            batch_size=batch_size  # 使用批处理大小
         )
         
         if not b1_stocks.empty:
